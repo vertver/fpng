@@ -16,6 +16,7 @@
 #include "fpng.h"
 #include <assert.h>
 #include <string.h>
+#include <vector>
 
 #ifdef _MSC_VER
 	#pragma warning (disable:4127) // conditional expression is constant
@@ -100,8 +101,6 @@
 	#error __BYTE_ORDER undefined. Compile with -D__BYTE_ORDER=1234 for little endian or -D__BYTE_ORDER=4321 for big endian.
 #endif
 
-namespace fpng
-{
 	static const int FPNG_FALSE = 0;
 	static const uint8_t FPNG_FDEC_VERSION = 0;
 	static const uint32_t FPNG_MAX_SUPPORTED_DIM = 1 << 24;
@@ -370,36 +369,73 @@ namespace fpng
 
 	cpu_info g_cpu_info;
 		
-	void fpng_init()
-	{
-		g_cpu_info.init();
+	extern "C" {
+
+		void fpng_init()
+		{
+			g_cpu_info.init();
+		}
 	}
 #else
+	extern "C" {
+
 	void fpng_init()
 	{
 	}
-#endif
-
-	bool fpng_cpu_supports_sse41()
-	{
-#if FPNG_X86_OR_X64_CPU && !FPNG_NO_SSE 
-		assert(g_cpu_info.m_initialized);
-		return g_cpu_info.can_use_sse41();
-#else
-		return false;
-#endif
 	}
-
-	uint32_t fpng_crc32(const void* pData, size_t size, uint32_t prev_crc32)
-	{
-#if FPNG_X86_OR_X64_CPU && !FPNG_NO_SSE 
-		if (g_cpu_info.can_use_pclmul())
-			return crc32_sse41_simd(static_cast<const uint8_t *>(pData), size, prev_crc32);
 #endif
 
-		return crc32_slice_by_4(pData, size, prev_crc32);
-	}
+	extern "C" {
 
+		void* fpng_alloc(void* ptr, size_t size, size_t prev_size)
+		{
+			if (ptr != nullptr) {
+				void* temp_ptr = realloc(ptr, size);
+				if (temp_ptr == nullptr) {
+					temp_ptr = malloc(size);
+					if (temp_ptr == nullptr) {
+						return nullptr;
+					}
+
+					memcpy(ptr, temp_ptr, std::min(size, prev_size));
+					free(ptr);
+				}
+
+				ptr = temp_ptr;
+			}
+			else {
+				ptr = malloc(size);
+			}
+
+			return ptr;
+		}
+
+		void fpng_free(void* ptr)
+		{
+			free(ptr);
+		}
+
+		int fpng_cpu_supports_sse41()
+		{
+	#if FPNG_X86_OR_X64_CPU && !FPNG_NO_SSE 
+			assert(g_cpu_info.m_initialized);
+			return g_cpu_info.can_use_sse41();
+	#else
+			return false;
+	#endif
+		}
+
+		uint32_t fpng_crc32(const void* pData, size_t size, uint32_t prev_crc32)
+		{
+	#if FPNG_X86_OR_X64_CPU && !FPNG_NO_SSE 
+			if (g_cpu_info.can_use_pclmul())
+				return crc32_sse41_simd(static_cast<const uint8_t *>(pData), size, prev_crc32);
+	#endif
+
+			return crc32_slice_by_4(pData, size, prev_crc32);
+		}
+
+	}
 #if FPNG_X86_OR_X64_CPU && !FPNG_NO_SSE 
 	// See "Fast Computation of Adler32 Checksums":
 	// https://www.intel.com/content/www/us/en/developer/articles/technical/fast-computation-of-adler32-checksums.html
@@ -477,13 +513,16 @@ namespace fpng
 		return (s2 << 16) + s1;
 	}
 
-	uint32_t fpng_adler32(const void* pData, size_t size, uint32_t adler)
-	{
+	extern "C" {
+
+		uint32_t fpng_adler32(const void* pData, size_t size, uint32_t adler)
+		{
 #if FPNG_X86_OR_X64_CPU && !FPNG_NO_SSE 
-		if (g_cpu_info.can_use_sse41())
-			return adler32_sse_16((const uint8_t*)pData, size, adler);
+			if (g_cpu_info.can_use_sse41())
+				return adler32_sse_16((const uint8_t*)pData, size, adler);
 #endif
-		return fpng_adler32_scalar((const uint8_t*)pData, size, adler);
+			return fpng_adler32_scalar((const uint8_t*)pData, size, adler);
+		}
 	}
 
 	// Ensure we've been configured for endianness correctly.
@@ -1659,174 +1698,155 @@ do_literals:
 		}
 	}
 
-	bool fpng_encode_image_to_memory(const void* pImage, uint32_t w, uint32_t h, uint32_t num_chans, std::vector<uint8_t>& out_buf, uint32_t flags)
-	{
-		if (!endian_check())
+	extern "C" {
+
+		uint8_t* fpng_encode_image_to_memory(const void* pImage, uint32_t w, uint32_t h, uint32_t num_chans, uint32_t* out_buf_size, uint32_t flags)
 		{
-			assert(0);
-			return false;
-		}
-
-		if ((w < 1) || (h < 1) || (w * (uint64_t)h > UINT32_MAX) || (w > FPNG_MAX_SUPPORTED_DIM) || (h > FPNG_MAX_SUPPORTED_DIM))
-		{
-			assert(0);
-			return false;
-		}
-
-		if ((num_chans != 3) && (num_chans != 4))
-		{
-			assert(0);
-			return false;
-		}
-
-		int i, bpl = w * num_chans;
-		uint32_t y;
-
-		std::vector<uint8_t> temp_buf;
-		temp_buf.resize((bpl + 1) * h + 7);
-		uint32_t temp_buf_ofs = 0;
-
-		for (y = 0; y < h; ++y)
-		{
-			const uint8_t* pSrc = (uint8_t*)pImage + y * bpl;
-			const uint8_t* pPrev_src = y ? ((uint8_t*)pImage + (y - 1) * bpl) : nullptr;
-
-			uint8_t* pDst = &temp_buf[temp_buf_ofs];
-
-			apply_filter(y ? 2 : 0, w, h, num_chans, bpl, pSrc, pPrev_src, pDst);
-
-			temp_buf_ofs += 1 + bpl;
-		}
-
-		const uint32_t PNG_HEADER_SIZE = 58;
-				
-		uint32_t out_ofs = PNG_HEADER_SIZE;
-				
-		out_buf.resize((out_ofs + (bpl + 1) * h + 7) & ~7);
-
-		uint32_t defl_size = 0;
-		if ((flags & FPNG_FORCE_UNCOMPRESSED) == 0)
-		{
-			if (num_chans == 3)
+			if (!endian_check())
 			{
-				if (flags & FPNG_ENCODE_SLOWER)
-					defl_size = pixel_deflate_dyn_3_rle(temp_buf.data(), w, h, &out_buf[out_ofs], (uint32_t)out_buf.size() - out_ofs);
-				else
-					defl_size = pixel_deflate_dyn_3_rle_one_pass(temp_buf.data(), w, h, &out_buf[out_ofs], (uint32_t)out_buf.size() - out_ofs);
+				assert(0);
+				return nullptr;
 			}
-			else
+
+			if ((w < 1) || (h < 1) || (w * (uint64_t)h > UINT32_MAX) || (w > FPNG_MAX_SUPPORTED_DIM) || (h > FPNG_MAX_SUPPORTED_DIM))
 			{
-				if (flags & FPNG_ENCODE_SLOWER)
-					defl_size = pixel_deflate_dyn_4_rle(temp_buf.data(), w, h, &out_buf[out_ofs], (uint32_t)out_buf.size() - out_ofs);
-				else
-					defl_size = pixel_deflate_dyn_4_rle_one_pass(temp_buf.data(), w, h, &out_buf[out_ofs], (uint32_t)out_buf.size() - out_ofs);
+				assert(0);
+				return nullptr;
 			}
-		}
 
-		uint32_t zlib_size = defl_size;
-		
-		if (!defl_size)
-		{
-			// Dynamic block failed to compress - fall back to uncompressed blocks, filter 0.
+			if ((num_chans != 3) && (num_chans != 4))
+			{
+				assert(0);
+				return nullptr;
+			}
 
-			temp_buf_ofs = 0;
+			int i, bpl = w * num_chans;
+			uint32_t y;
+
+			std::vector<uint8_t> temp_buf;
+			temp_buf.resize((bpl + 1) * h + 7);
+			uint32_t temp_buf_ofs = 0;
 
 			for (y = 0; y < h; ++y)
 			{
 				const uint8_t* pSrc = (uint8_t*)pImage + y * bpl;
+				const uint8_t* pPrev_src = y ? ((uint8_t*)pImage + (y - 1) * bpl) : nullptr;
 
 				uint8_t* pDst = &temp_buf[temp_buf_ofs];
 
-				apply_filter(0, w, h, num_chans, bpl, pSrc, nullptr, pDst);
+				apply_filter(y ? 2 : 0, w, h, num_chans, bpl, pSrc, pPrev_src, pDst);
 
 				temp_buf_ofs += 1 + bpl;
 			}
 
-			assert(temp_buf_ofs <= temp_buf.size());
-						
-			out_buf.resize(out_ofs + 6 + temp_buf_ofs + ((temp_buf_ofs + 65534) / 65535) * 5);
+			const uint32_t PNG_HEADER_SIZE = 58;
 
-			uint32_t raw_size = write_raw_block(temp_buf.data(), (uint32_t)temp_buf_ofs, out_buf.data() + out_ofs, (uint32_t)out_buf.size() - out_ofs);
-			if (!raw_size)
+			uint32_t out_ofs = PNG_HEADER_SIZE;
+
+			*out_buf_size = (out_ofs + (bpl + 1) * h + 7) & ~7;
+			uint8_t* out_buf = (uint8_t*)fpng_alloc(nullptr, *out_buf_size, 0);
+
+			uint32_t defl_size = 0;
+			if ((flags & FPNG_FORCE_UNCOMPRESSED) == 0)
 			{
-				// Somehow we miscomputed the size of the output buffer.
-				assert(0);
-				return false;
+				if (num_chans == 3)
+				{
+					if (flags & FPNG_ENCODE_SLOWER)
+						defl_size = pixel_deflate_dyn_3_rle(temp_buf.data(), w, h, &out_buf[out_ofs], *out_buf_size - out_ofs);
+					else
+						defl_size = pixel_deflate_dyn_3_rle_one_pass(temp_buf.data(), w, h, &out_buf[out_ofs], *out_buf_size - out_ofs);
+				}
+				else
+				{
+					if (flags & FPNG_ENCODE_SLOWER)
+						defl_size = pixel_deflate_dyn_4_rle(temp_buf.data(), w, h, &out_buf[out_ofs], *out_buf_size - out_ofs);
+					else
+						defl_size = pixel_deflate_dyn_4_rle_one_pass(temp_buf.data(), w, h, &out_buf[out_ofs], *out_buf_size - out_ofs);
+				}
 			}
 
-			zlib_size = raw_size;
+			uint32_t zlib_size = defl_size;
+
+			if (!defl_size)
+			{
+				// Dynamic block failed to compress - fall back to uncompressed blocks, filter 0.
+
+				temp_buf_ofs = 0;
+
+				for (y = 0; y < h; ++y)
+				{
+					const uint8_t* pSrc = (uint8_t*)pImage + y * bpl;
+
+					uint8_t* pDst = &temp_buf[temp_buf_ofs];
+
+					apply_filter(0, w, h, num_chans, bpl, pSrc, nullptr, pDst);
+
+					temp_buf_ofs += 1 + bpl;
+				}
+
+				assert(temp_buf_ofs <= temp_buf.size());
+
+				out_buf = (uint8_t*)fpng_alloc(out_buf, out_ofs + 6 + temp_buf_ofs + ((temp_buf_ofs + 65534) / 65535) * 5, *out_buf_size);
+				*out_buf_size = out_ofs + 6 + temp_buf_ofs + ((temp_buf_ofs + 65534) / 65535) * 5;
+
+				uint32_t raw_size = write_raw_block(temp_buf.data(), (uint32_t)temp_buf_ofs, out_buf + out_ofs, *out_buf_size - out_ofs);
+				if (!raw_size)
+				{
+					// Somehow we miscomputed the size of the output buffer.
+					assert(0);
+					return nullptr;
+				}
+
+				zlib_size = raw_size;
+			}
+
+			out_buf = (uint8_t*)fpng_alloc(out_buf, out_ofs + zlib_size, *out_buf_size);
+			*out_buf_size = out_ofs + zlib_size;
+
+			const uint32_t idat_len = *out_buf_size - PNG_HEADER_SIZE;
+
+			// Write real PNG header, fdEC chunk, and the beginning of the IDAT chunk
+			{
+				static const uint8_t s_color_type[] = { 0x00, 0x00, 0x04, 0x02, 0x06 };
+
+				uint8_t pnghdr[58] = {
+					0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,   // PNG sig
+					0x00,0x00,0x00,0x0d, 'I','H','D','R',  // IHDR chunk len, type
+					0,0,(uint8_t)(w >> 8),(uint8_t)w, // width
+					0,0,(uint8_t)(h >> 8),(uint8_t)h, // height
+					8,   //bit_depth
+					s_color_type[num_chans], // color_type
+					0, // compression
+					0, // filter
+					0, // interlace
+					0, 0, 0, 0, // IHDR crc32
+					0, 0, 0, 5, 'f', 'd', 'E', 'C', 82, 36, 147, 227, FPNG_FDEC_VERSION,   0xE5, 0xAB, 0x62, 0x99, // our custom private, ancillary, do not copy, fdEC chunk
+				  (uint8_t)(idat_len >> 24),(uint8_t)(idat_len >> 16),(uint8_t)(idat_len >> 8),(uint8_t)idat_len, 'I','D','A','T' // IDATA chunk len, type
+				};
+
+				// Compute IHDR CRC32
+				uint32_t c = (uint32_t)fpng_crc32(pnghdr + 12, 17, FPNG_CRC32_INIT);
+				for (i = 0; i < 4; ++i, c <<= 8)
+					((uint8_t*)(pnghdr + 29))[i] = (uint8_t)(c >> 24);
+
+				memcpy(out_buf, pnghdr, PNG_HEADER_SIZE);
+			}
+
+			// Write IDAT chunk's CRC32 and a 0 length IEND chunk
+			out_buf = (uint8_t*)fpng_alloc(out_buf, *out_buf_size + 16, *out_buf_size);
+			memcpy(out_buf + *out_buf_size, "\0\0\0\0\0\0\0\0\x49\x45\x4e\x44\xae\x42\x60\x82", 16);
+			*out_buf_size = *out_buf_size + 16;
+
+			// Compute IDAT crc32
+			uint32_t c = (uint32_t)fpng_crc32(out_buf + PNG_HEADER_SIZE - 4, idat_len + 4, FPNG_CRC32_INIT);
+
+			for (i = 0; i < 4; ++i, c <<= 8) {
+				(out_buf + *out_buf_size - 16)[i] = (uint8_t)(c >> 24);
+			}
+
+			return out_buf;
 		}
-		
-		assert((out_ofs + zlib_size) <= out_buf.size());
-
-		out_buf.resize(out_ofs + zlib_size);
-
-		const uint32_t idat_len = (uint32_t)out_buf.size() - PNG_HEADER_SIZE;
-
-		// Write real PNG header, fdEC chunk, and the beginning of the IDAT chunk
-		{
-			static const uint8_t s_color_type[] = { 0x00, 0x00, 0x04, 0x02, 0x06 };
-
-			uint8_t pnghdr[58] = { 
-				0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,   // PNG sig
-				0x00,0x00,0x00,0x0d, 'I','H','D','R',  // IHDR chunk len, type
-			    0,0,(uint8_t)(w >> 8),(uint8_t)w, // width
-				0,0,(uint8_t)(h >> 8),(uint8_t)h, // height
-				8,   //bit_depth
-				s_color_type[num_chans], // color_type
-				0, // compression
-				0, // filter
-				0, // interlace
-				0, 0, 0, 0, // IHDR crc32
-				0, 0, 0, 5, 'f', 'd', 'E', 'C', 82, 36, 147, 227, FPNG_FDEC_VERSION,   0xE5, 0xAB, 0x62, 0x99, // our custom private, ancillary, do not copy, fdEC chunk
-			  (uint8_t)(idat_len >> 24),(uint8_t)(idat_len >> 16),(uint8_t)(idat_len >> 8),(uint8_t)idat_len, 'I','D','A','T' // IDATA chunk len, type
-			}; 
-
-			// Compute IHDR CRC32
-			uint32_t c = (uint32_t)fpng_crc32(pnghdr + 12, 17, FPNG_CRC32_INIT);
-			for (i = 0; i < 4; ++i, c <<= 8)
-				((uint8_t*)(pnghdr + 29))[i] = (uint8_t)(c >> 24);
-
-			memcpy(out_buf.data(), pnghdr, PNG_HEADER_SIZE);
-		}
-
-		// Write IDAT chunk's CRC32 and a 0 length IEND chunk
-		vector_append(out_buf, "\0\0\0\0\0\0\0\0\x49\x45\x4e\x44\xae\x42\x60\x82", 16); // IDAT CRC32, followed by the IEND chunk
-
-		// Compute IDAT crc32
-		uint32_t c = (uint32_t)fpng_crc32(out_buf.data() + PNG_HEADER_SIZE - 4, idat_len + 4, FPNG_CRC32_INIT);
-		
-		for (i = 0; i < 4; ++i, c <<= 8)
-			(out_buf.data() + out_buf.size() - 16)[i] = (uint8_t)(c >> 24);
-				
-		return true;
 	}
-
-#ifndef FPNG_NO_STDIO
-	bool fpng_encode_image_to_file(const char* pFilename, const void* pImage, uint32_t w, uint32_t h, uint32_t num_chans, uint32_t flags)
-	{
-		std::vector<uint8_t> out_buf;
-		if (!fpng_encode_image_to_memory(pImage, w, h, num_chans, out_buf, flags))
-			return false;
-
-		FILE* pFile = nullptr;
-#ifdef _MSC_VER
-		fopen_s(&pFile, pFilename, "wb");
-#else
-		pFile = fopen(pFilename, "wb");
-#endif
-		if (!pFile)
-			return false;
-
-		if (fwrite(out_buf.data(), 1, out_buf.size(), pFile) != out_buf.size())
-		{
-			fclose(pFile);
-			return false;
-		}
-
-		return (fclose(pFile) != EOF);
-	}
-#endif
 
 	// Decompression
 
@@ -3076,121 +3096,74 @@ do_literals:
 		return FPNG_DECODE_SUCCESS;
 	}
 
-	int fpng_get_info(const void* pImage, uint32_t image_size, uint32_t& width, uint32_t& height, uint32_t& channels_in_file)
-	{
-		uint32_t idat_ofs = 0, idat_len = 0;
-		return fpng_get_info_internal(pImage, image_size, width, height, channels_in_file, idat_ofs, idat_len);
-	}
-
-	int fpng_decode_memory(const void *pImage, uint32_t image_size, std::vector<uint8_t> &out, uint32_t& width, uint32_t& height, uint32_t &channels_in_file, uint32_t desired_channels)
-	{
-		out.resize(0);
-		width = 0;
-		height = 0;
-		channels_in_file = 0;
-
-		if ((!pImage) || (!image_size) || ((desired_channels != 3) && (desired_channels != 4)))
+	extern "C" {
+		int fpng_get_info(const void* pImage, uint32_t image_size, uint32_t* width, uint32_t* height, uint32_t* channels_in_file)
 		{
-			assert(0);
-			return FPNG_DECODE_INVALID_ARG;
+			uint32_t idat_ofs = 0, idat_len = 0;
+			return fpng_get_info_internal(pImage, image_size, *width, *height, *channels_in_file, idat_ofs, idat_len);
 		}
 
-		uint32_t idat_ofs = 0, idat_len = 0;
-		int status = fpng_get_info_internal(pImage, image_size, width, height, channels_in_file, idat_ofs, idat_len);
-		if (status)
-			return status;
-				
-		const uint64_t mem_needed = (uint64_t)width * height * desired_channels;
-		if (mem_needed > UINT32_MAX)
-			return FPNG_DECODE_FAILED_DIMENSIONS_TOO_LARGE;
-
-		// On 32-bit systems do a quick sanity check before we try to resize the output buffer.
-		if ((sizeof(size_t) == sizeof(uint32_t)) && (mem_needed >= 0x80000000))
-			return FPNG_DECODE_FAILED_DIMENSIONS_TOO_LARGE;
-
-		out.resize(mem_needed);
-		
-		const uint8_t* pIDAT_data = static_cast<const uint8_t*>(pImage) + idat_ofs + sizeof(uint32_t) * 2;
-		const uint32_t src_len = image_size - (idat_ofs + sizeof(uint32_t) * 2);
-
-		bool decomp_status;
-		if (desired_channels == 3)
+		uint8_t* fpng_decode_memory(const void* pImage, uint32_t image_size, uint32_t* width, uint32_t* height, uint32_t* channels_in_file, uint32_t* buf_size, uint32_t desired_channels)
 		{
-			if (channels_in_file == 3)
-				decomp_status = fpng_pixel_zlib_decompress_3<3>(pIDAT_data, src_len, idat_len, out.data(), width, height);
+			if (width == nullptr || height == nullptr || channels_in_file == nullptr)
+			{
+				assert(0);
+				return nullptr;
+			}
+
+			if ((!pImage) || (!image_size) || ((desired_channels != 3) && (desired_channels != 4)))
+			{
+				assert(0);
+				return nullptr;
+			}
+
+			uint32_t idat_ofs = 0, idat_len = 0;
+			int status = fpng_get_info_internal(pImage, image_size, *width, *height, *channels_in_file, idat_ofs, idat_len);
+			if (status) {
+				return nullptr;
+			}
+
+			const uint64_t mem_needed = (uint64_t)*width * *height * desired_channels;
+			if (mem_needed > UINT32_MAX)
+				return nullptr;
+
+			// On 32-bit systems do a quick sanity check before we try to resize the output buffer.
+			if ((sizeof(size_t) == sizeof(uint32_t)) && (mem_needed >= 0x80000000))
+				return nullptr;
+
+			*buf_size = (uint32_t)mem_needed;
+			uint8_t* out = (uint8_t*)fpng_alloc(nullptr, mem_needed, 0);
+
+			const uint8_t* pIDAT_data = static_cast<const uint8_t*>(pImage) + idat_ofs + sizeof(uint32_t) * 2;
+			const uint32_t src_len = image_size - (idat_ofs + sizeof(uint32_t) * 2);
+
+			bool decomp_status;
+			if (desired_channels == 3)
+			{
+				if (*channels_in_file == 3)
+					decomp_status = fpng_pixel_zlib_decompress_3<3>(pIDAT_data, src_len, idat_len, out, *width, *height);
+				else
+					decomp_status = fpng_pixel_zlib_decompress_4<3>(pIDAT_data, src_len, idat_len, out, *width, *height);
+			}
 			else
-				decomp_status = fpng_pixel_zlib_decompress_4<3>(pIDAT_data, src_len, idat_len, out.data(), width, height);
-		}
-		else
-		{
-			if (channels_in_file == 3)
-				decomp_status = fpng_pixel_zlib_decompress_3<4>(pIDAT_data, src_len, idat_len, out.data(), width, height);
-			else
-				decomp_status = fpng_pixel_zlib_decompress_4<4>(pIDAT_data, src_len, idat_len, out.data(), width, height);
-		}
-		if (!decomp_status)
-		{
-			// Something went wrong. Either the file data was corrupted, or it doesn't conform to one of our zlib/Deflate constraints.
-			// The conservative thing to do is indicate it wasn't written by us, and let the general purpose PNG decoder handle it.
-			return FPNG_DECODE_NOT_FPNG;
-		}
+			{
+				if (*channels_in_file == 3)
+					decomp_status = fpng_pixel_zlib_decompress_3<4>(pIDAT_data, src_len, idat_len, out, *width, *height);
+				else
+					decomp_status = fpng_pixel_zlib_decompress_4<4>(pIDAT_data, src_len, idat_len, out, *width, *height);
+			}
 
-		return FPNG_DECODE_SUCCESS;
+			if (!decomp_status)
+			{
+				// Something went wrong. Either the file data was corrupted, or it doesn't conform to one of our zlib/Deflate constraints.
+				// The conservative thing to do is indicate it wasn't written by us, and let the general purpose PNG decoder handle it.
+				fpng_free(out);
+				return nullptr;
+			}
+
+			return out;
+		}
 	}
-
-#ifndef FPNG_NO_STDIO
-	int fpng_decode_file(const char* pFilename, std::vector<uint8_t>& out, uint32_t& width, uint32_t& height, uint32_t& channels_in_file, uint32_t desired_channels)
-	{
-		FILE* pFile = nullptr;
-
-#ifdef _MSC_VER
-		fopen_s(&pFile, pFilename, "rb");
-#else
-		pFile = fopen(pFilename, "rb");
-#endif
-
-		if (!pFile)
-			return FPNG_DECODE_FILE_OPEN_FAILED;
-
-		if (fseek(pFile, 0, SEEK_END) != 0)
-		{
-			fclose(pFile);
-			return FPNG_DECODE_FILE_SEEK_FAILED;
-		}
-
-#ifdef _WIN32
-		int64_t filesize = _ftelli64(pFile);
-#else
-		int64_t filesize = ftello(pFile);
-#endif
-
-		if (fseek(pFile, 0, SEEK_SET) != 0)
-		{
-			fclose(pFile);
-			return FPNG_DECODE_FILE_SEEK_FAILED;
-		}
-
-		if ( (filesize < 0) || (filesize > UINT32_MAX) || ( (sizeof(size_t) == sizeof(uint32_t)) && (filesize > 0x70000000) ) )
-		{
-			fclose(pFile);
-			return FPNG_DECODE_FILE_TOO_LARGE;
-		}
-
-		std::vector<uint8_t> buf((size_t)filesize);
-		if (fread(buf.data(), 1, buf.size(), pFile) != buf.size())
-		{
-			fclose(pFile);
-			return FPNG_DECODE_FILE_READ_FAILED;
-		}
-
-		fclose(pFile);
-
-		return fpng_decode_memory(buf.data(), (uint32_t)buf.size(), out, width, height, channels_in_file, desired_channels);
-	}
-#endif
-
-} // namespace fpng
-
 /*
 	This is free and unencumbered software released into the public domain.
 

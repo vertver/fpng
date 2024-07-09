@@ -519,15 +519,14 @@ static bool fuzz_test_encoder(
 			printf("%u, %u bits flipped\n", fuzz_trial, total_bits_flipped);
 		}
 
-		std::vector<uint8_t> fpng_file_buf;
-				
-		if (!fpng::fpng_encode_image_to_memory(temp_buf.data(), source_width, source_height, source_chans, fpng_file_buf, fpng_flags))
-		{
+		uint32_t fpng_file_buf_size = 0;
+		uint8_t* fpng_file_buf = fpng_encode_image_to_memory(temp_buf.data(), source_width, source_height, source_chans, &fpng_file_buf_size, fpng_flags);		
+		if (!fpng_file_buf) {
 			fprintf(stderr, "fpng_encode_image_to_memory() failed!\n");
 			return false;
 		}
 
-		printf("fpng size: %u\n", (uint32_t)fpng_file_buf.size());
+		printf("fpng size: %u\n", fpng_file_buf_size);
 
 #if 0
 		char filename[256];
@@ -541,7 +540,7 @@ static bool fuzz_test_encoder(
 
 		unsigned int lodepng_decoded_w = 0, lodepng_decoded_h = 0;
 		unsigned char* lodepng_decoded_buffer = nullptr;
-		int error = lodepng_decode_memory(&lodepng_decoded_buffer, &lodepng_decoded_w, &lodepng_decoded_h, (unsigned char*)fpng_file_buf.data(), fpng_file_buf.size(), LCT_RGBA, 8);
+		int error = lodepng_decode_memory(&lodepng_decoded_buffer, &lodepng_decoded_w, &lodepng_decoded_h, (unsigned char*)fpng_file_buf, fpng_file_buf_size, LCT_RGBA, 8);
 		if (error != 0)
 		{
 			fprintf(stderr, "lodepng failed decompressing FPNG's output PNG file!\n");
@@ -565,15 +564,15 @@ static bool fuzz_test_encoder(
 		}
 
 		{
-			std::vector<uint8_t> fpngd_decode_buffer;
 			uint32_t channels_in_file;
 			uint32_t decoded_width, decoded_height;
 
 			uint32_t desired_chans = 4;// source_chans;
-			int res = fpng::fpng_decode_memory(fpng_file_buf.data(), (uint32_t)fpng_file_buf.size(), fpngd_decode_buffer, decoded_width, decoded_height, channels_in_file, desired_chans);
-			if (res != 0)
+			uint32_t fpngd_decode_buffer_size = 0;
+			uint8_t* fpngd_decode_buffer = fpng_decode_memory(fpng_file_buf, fpng_file_buf_size, &decoded_width, &decoded_height, &channels_in_file, &fpngd_decode_buffer_size, desired_chans);
+			if (fpngd_decode_buffer == nullptr)
 			{
-				fprintf(stderr, "fpng::fpng_decode() failed with error %i!\n", res);
+				fprintf(stderr, "fpng::fpng_decode() failed with error!\n");
 				return false;
 			}
 
@@ -606,8 +605,11 @@ static bool fuzz_test_encoder(
 					return false;
 				}
 			}
+
+			fpng_free(fpngd_decode_buffer);
 		}
 
+		fpng_free(fpng_file_buf);
 		free(lodepng_decoded_buffer);
 	}
 
@@ -646,36 +648,41 @@ static int fuzz_test_encoder2(uint32_t fpng_flags)
 
 		printf("Testing %ux%u %u\n", width, height, num_chans);
 
-		std::vector<uint8_t> fpng_file_buf;
-
-		if (!fpng::fpng_encode_image_to_memory(temp_buf.data(), width, height, num_chans, fpng_file_buf, fpng_flags))
+		uint32_t fpng_file_buf_size = 0;
+		uint8_t* fpng_file_buf = fpng_encode_image_to_memory(temp_buf.data(), width, height, num_chans, &fpng_file_buf_size, fpng_flags);
+		if (!fpng_file_buf)
 		{
 			fprintf(stderr, "fpng_encode_image_to_memory() failed!\n");
 			return EXIT_FAILURE;
 		}
 
-		printf("fpng size: %u\n", (uint32_t)fpng_file_buf.size());
+		printf("fpng size: %u\n", fpng_file_buf_size);
 
-		std::vector<uint8_t> decomp_buf;
-		uint32_t dec_width, dec_height, dec_chans;
-		int res = fpng::fpng_decode_memory(fpng_file_buf.data(), (uint32_t)fpng_file_buf.size(), decomp_buf, dec_width, dec_height, dec_chans, num_chans);
-		if (res != fpng::FPNG_DECODE_SUCCESS)
+		uint32_t dec_width, dec_height, dec_chans, decomp_buf_size;
+		uint8_t* decomp_buf = fpng_decode_memory(fpng_file_buf, fpng_file_buf_size, &dec_width, &dec_height, &dec_chans, &decomp_buf_size, num_chans);
+		if (decomp_buf == nullptr)
 		{
 			fprintf(stderr, "fpng::fpng_decode_memory() failed!\n");
 			return EXIT_FAILURE;
 		}
 
+		fpng_free(fpng_file_buf);
+
 		if ((dec_width != width) || (dec_height != height) || (dec_chans != num_chans))
 		{
+			fpng_free(decomp_buf);
 			fprintf(stderr, "fpng::fpng_decode_memory() returned an invalid image!\n");
 			return EXIT_FAILURE;
 		}
 
-		if (memcmp(decomp_buf.data(), temp_buf.data(), dec_width * dec_height * dec_chans) != 0)
+		if (memcmp(decomp_buf, temp_buf.data(), dec_width * dec_height * dec_chans) != 0)
 		{
+			fpng_free(decomp_buf);
 			fprintf(stderr, "Decoded image failed verification\n");
 			return EXIT_FAILURE;
 		}
+
+		fpng_free(decomp_buf);
 	}
 
 	return EXIT_SUCCESS;
@@ -974,7 +981,7 @@ static int training_mode(const char* pFilename)
 
 int main(int arg_c, char **arg_v)
 {
-	fpng::fpng_init();
+	fpng_init();
 	
 	if (arg_c < 2)
 	{
@@ -1063,9 +1070,9 @@ int main(int arg_c, char **arg_v)
 
 	uint32_t fpng_flags = 0;
 	if (slower_encoding)
-		fpng_flags |= fpng::FPNG_ENCODE_SLOWER;
+		fpng_flags |= FPNG_ENCODE_SLOWER;
 	if (force_uncompressed)
-		fpng_flags |= fpng::FPNG_FORCE_UNCOMPRESSED;
+		fpng_flags |= FPNG_FORCE_UNCOMPRESSED;
 
 	if (fuzz_encoder2)
 		return fuzz_test_encoder2(fpng_flags);
@@ -1075,7 +1082,7 @@ int main(int arg_c, char **arg_v)
 
 	if (!csv_flag)
 	{
-		printf("SSE 4.1 supported: %u\n", fpng::fpng_cpu_supports_sse41());
+		printf("SSE 4.1 supported: %u\n", fpng_cpu_supports_sse41());
 
 		printf("Filename: %s\n", pFilename);
 		if (pAlpha_filename)
@@ -1091,23 +1098,24 @@ int main(int arg_c, char **arg_v)
 
 	if (fuzz_decoder)
 	{
-		std::vector<uint8_t> fpngd_decode_buffer;
 		uint32_t channels_in_file;
-		uint32_t decoded_width, decoded_height;
+		uint32_t decoded_width, decoded_height, fpngd_decode_buffer_size;
 
-		int res = fpng::fpng_decode_memory(source_file_data.data(), (uint32_t)source_file_data.size(), fpngd_decode_buffer, decoded_width, decoded_height, channels_in_file, 3);
-		if (res != 0)
+		uint8_t* fpngd_decode_buffer = fpng_decode_memory(source_file_data.data(), (uint32_t)source_file_data.size(), &decoded_width, &decoded_height, &channels_in_file, &fpngd_decode_buffer_size, 3);
+		if (fpngd_decode_buffer == nullptr)
 		{
-			fprintf(stderr, "fpng::fpng_decode() failed with error %i!\n", res);
+			fprintf(stderr, "fpng::fpng_decode() failed with error!\n");
 			return EXIT_FAILURE;
 		}
 
-		if (lodepng_encode_file("out.png", fpngd_decode_buffer.data(), decoded_width, decoded_height, (channels_in_file == 4) ? LCT_RGBA : LCT_RGB, 8) != 0)
+		if (lodepng_encode_file("out.png", fpngd_decode_buffer, decoded_width, decoded_height, (channels_in_file == 4) ? LCT_RGBA : LCT_RGB, 8) != 0)
 		{
-			fprintf(stderr, "lodepng_encode_file() failed with error %i!\n", res);
+			fpng_free(fpngd_decode_buffer);
+			fprintf(stderr, "lodepng_encode_file() failed with error!\n");
 			return EXIT_FAILURE;
 		}
 
+		fpng_free(fpngd_decode_buffer);
 		printf("Wrote out.png %ux%u %u\n", decoded_width, decoded_height, channels_in_file);
 
 		return EXIT_SUCCESS;
@@ -1195,12 +1203,14 @@ int main(int arg_c, char **arg_v)
 		return status ? EXIT_SUCCESS : EXIT_FAILURE;
 	}
 
-	std::vector<uint8_t> fpng_file_buf;
+	uint8_t* fpng_file_buf = nullptr;
+	uint32_t fpng_file_buf_size = 0;
 	double fpng_best_time = 1e+9f;
 	for (uint32_t i = 0; i < NUM_TIMES_TO_ENCODE; i++)
 	{
 		tm.start();
-		if (!fpng::fpng_encode_image_to_memory((source_chans == 3) ? (const void *)pSource_pixels24 : (const void*)pSource_pixels32, source_width, source_height, source_chans, fpng_file_buf, fpng_flags))
+		fpng_file_buf = fpng_encode_image_to_memory((source_chans == 3) ? (const void*)pSource_pixels24 : (const void*)pSource_pixels32, source_width, source_height, source_chans, &fpng_file_buf_size, fpng_flags);
+		if (!fpng_file_buf)
 		{
 			fprintf(stderr, "fpng_encode_image_to_memory() failed!\n");
 			return EXIT_FAILURE;
@@ -1209,12 +1219,13 @@ int main(int arg_c, char **arg_v)
 	}
 
 	if (!csv_flag)
-		printf("FPNG:    %4.6f secs, %u bytes, %4.3f MB, %4.3f MP/sec\n", fpng_best_time, (uint32_t)fpng_file_buf.size(), fpng_file_buf.size() / (1024.0f * 1024.0f), total_source_pixels / (1024.0f * 1024.0f) / fpng_best_time);
+		printf("FPNG:    %4.6f secs, %u bytes, %4.3f MB, %4.3f MP/sec\n", fpng_best_time, fpng_file_buf_size, fpng_file_buf_size / (1024.0f * 1024.0f), total_source_pixels / (1024.0f * 1024.0f) / fpng_best_time);
 
 	if (!csv_flag)
 	{
-		if (!write_data_to_file("fpng.png", fpng_file_buf.data(), fpng_file_buf.size()))
+		if (!write_data_to_file("fpng.png", fpng_file_buf, fpng_file_buf_size))
 		{
+			fpng_free(fpng_file_buf);
 			fprintf(stderr, "Failed writing to file fpng.png\n");
 			return EXIT_FAILURE;
 		}
@@ -1235,27 +1246,30 @@ int main(int arg_c, char **arg_v)
 
 	// Decode the file using our decompressor
 	{
-		std::vector<uint8_t> fpngd_decode_buffer;
+		uint8_t* fpngd_decode_buffer = nullptr;
 		uint32_t channels_in_file;
-		uint32_t decoded_width, decoded_height;
+		uint32_t decoded_width, decoded_height, fpngd_decode_buffer_size;
 
 		fpng_decode_time = 1e+9f;
 
-		int res;
 		for (uint32_t i = 0; i < NUM_TIMES_TO_DECODE; i++)
 		{
-			fpngd_decode_buffer.clear();
-						
 			tm.start();
-			res = fpng::fpng_decode_memory(fpng_file_buf.data(), (uint32_t)fpng_file_buf.size(), fpngd_decode_buffer, decoded_width, decoded_height, channels_in_file, 4);
-			if (res != 0)
+			if (fpngd_decode_buffer) {
+				fpng_free(fpngd_decode_buffer);
+				fpngd_decode_buffer = nullptr;
+			}
+
+			fpngd_decode_buffer = fpng_decode_memory(fpng_file_buf, fpng_file_buf_size, &decoded_width, &decoded_height, &channels_in_file, &fpngd_decode_buffer_size, 4);
+			if (fpngd_decode_buffer == nullptr)
 				break;
+
 			fpng_decode_time = minimum(tm.get_elapsed_secs(), fpng_decode_time);
 		}
 
-		if (res != 0)
+		if (fpngd_decode_buffer == nullptr)
 		{
-			fprintf(stderr, "fpng::fpng_decode() failed with error %i!\n", res);
+			fprintf(stderr, "fpng::fpng_decode() failed with error!\n");
 			return EXIT_FAILURE;
 		}
 
@@ -1265,7 +1279,7 @@ int main(int arg_c, char **arg_v)
 			return EXIT_FAILURE;
 		}
 
-		if (memcmp(fpngd_decode_buffer.data(), pSource_pixels32, total_source_pixels * 4) != 0)
+		if (memcmp(fpngd_decode_buffer, pSource_pixels32, total_source_pixels * 4) != 0)
 		{
 			fprintf(stderr, "FPNG decode verification failed (using FPNG)!\n");
 			return EXIT_FAILURE;
@@ -1275,14 +1289,13 @@ int main(int arg_c, char **arg_v)
 	// Test 4->3 conversion in FPNG decoder
 	if (source_chans == 4)
 	{
-		std::vector<uint8_t> fpngd_decode_buffer2;
 		uint32_t channels_in_file2;
-		uint32_t decoded_width2, decoded_height2;
+		uint32_t decoded_width2, decoded_height2, fpngd_decode_buffer2_size;
 
-		int res = fpng::fpng_decode_memory(fpng_file_buf.data(), (uint32_t)fpng_file_buf.size(), fpngd_decode_buffer2, decoded_width2, decoded_height2, channels_in_file2, 3);
-		if (res != 0)
+		uint8_t* fpngd_decode_buffer2 = fpng_decode_memory(fpng_file_buf, fpng_file_buf_size, &decoded_width2, &decoded_height2, &channels_in_file2, &fpngd_decode_buffer2_size, 3);
+		if (fpngd_decode_buffer2 == nullptr)
 		{
-			fprintf(stderr, "fpng::fpng_decode() failed with error %i!\n", res);
+			fprintf(stderr, "fpng::fpng_decode() failed with error!\n");
 			return EXIT_FAILURE;
 		}
 
@@ -1292,158 +1305,15 @@ int main(int arg_c, char **arg_v)
 			return EXIT_FAILURE;
 		}
 
-		if (memcmp(fpngd_decode_buffer2.data(), pSource_pixels24, total_source_pixels * 3) != 0)
+		if (memcmp(fpngd_decode_buffer2, pSource_pixels24, total_source_pixels * 3) != 0)
 		{
 			fprintf(stderr, "FPNG decode verification failed (using FPNG)!\n");
 			return EXIT_FAILURE;
 		}
+
+		fpng_free(fpngd_decode_buffer2);
 	}
 
-	// Test 3->4 conversion in FPNG decoder
-	if (source_chans == 3)
-	{
-		std::vector<uint8_t> fpngd_decode_buffer2;
-		uint32_t channels_in_file2;
-		uint32_t decoded_width2, decoded_height2;
-
-		int res = fpng::fpng_decode_memory(fpng_file_buf.data(), (uint32_t)fpng_file_buf.size(), fpngd_decode_buffer2, decoded_width2, decoded_height2, channels_in_file2, 4);
-		if (res != 0)
-		{
-			fprintf(stderr, "fpng::fpng_decode() failed with error %i!\n", res);
-			return EXIT_FAILURE;
-		}
-
-		if ((channels_in_file2 != 3) || (decoded_width2 != source_width) || (decoded_height2 != source_height))
-		{
-			fprintf(stderr, "fpng::fpng_decode() returned an invalid image\n");
-			return EXIT_FAILURE;
-		}
-
-		if (memcmp(fpngd_decode_buffer2.data(), pSource_pixels32, total_source_pixels * 4) != 0)
-		{
-			fprintf(stderr, "FPNG decode verification failed (using FPNG)!\n");
-			return EXIT_FAILURE;
-		}
-	}
-
-	// Verify FPNG's output data using lodepng
-	{
-		uint32_t lodepng_decoded_w = 0, lodepng_decoded_h = 0;
-		uint8_t* lodepng_decoded_buffer = nullptr;
-		
-		lodepng_decode_time = 1e+9f;
-
-		for (uint32_t i = 0; i < NUM_TIMES_TO_DECODE; i++)
-		{
-			if (lodepng_decoded_buffer)
-			{
-				free(lodepng_decoded_buffer);
-				lodepng_decoded_buffer = nullptr;
-			}
-
-			tm.start();
-			error = lodepng_decode_memory(&lodepng_decoded_buffer, &lodepng_decoded_w, &lodepng_decoded_h, (uint8_t*)fpng_file_buf.data(), fpng_file_buf.size(), LCT_RGBA, 8);
-			if (error != 0)
-				break;
-			lodepng_decode_time = minimum(tm.get_elapsed_secs(), lodepng_decode_time);
-		}
-				
-		if (error != 0)
-		{
-			fprintf(stderr, "lodepng failed decompressing FPNG's output PNG file!\n");
-			return EXIT_FAILURE;
-		}
-
-		if (memcmp(lodepng_decoded_buffer, pSource_pixels32, total_source_pixels * 4) != 0)
-		{
-			fprintf(stderr, "FPNG decode verification failed (using lodepng)!\n");
-			return EXIT_FAILURE;
-		}
-		free(lodepng_decoded_buffer);
-	}
-
-	// Verify FPNG's output data using stb_image.h
-	{
-		int x, y, c;
-		
-		void* p = nullptr;
-
-		stbi_decode_time = 1e+9f;
-		for (uint32_t i = 0; i < NUM_TIMES_TO_DECODE; i++)
-		{
-			if (p)
-			{
-				free(p);
-				p = nullptr;
-			}
-
-			tm.start();
-			p = stbi_load_from_memory(fpng_file_buf.data(), (int)fpng_file_buf.size(), &x, &y, &c, 4);
-			if (!p)
-				break;
-			
-			stbi_decode_time = minimum(stbi_decode_time, tm.get_elapsed_secs());
-		}
-
-		if (!p)
-		{
-			fprintf(stderr, "stb_image.h failed decompressing FPNG's output PNG file!\n");
-			return EXIT_FAILURE;
-		}
-
-		if (memcmp(p, pSource_pixels32, total_source_pixels * 4) != 0)
-		{
-			fprintf(stderr, "FPNG decode verification failed (using stb_image.h)!\n");
-			return EXIT_FAILURE;
-		}
-		free(p);
-	}
-
-	// Verify FPNG's output data using wuffs
-	{
-		void* p = nullptr;
-
-		//static void* 
-
-		wuffs_decode_time = 1e+9f;
-		for (uint32_t i = 0; i < NUM_TIMES_TO_DECODE; i++)
-		{
-			if (p)
-			{
-				free(p);
-				p = nullptr;
-			}
-
-			tm.start();
-			
-			uint32_t w, h;
-			p = wuffs_decode(fpng_file_buf.data(), fpng_file_buf.size(), w, h);
-			if (!p)
-				break;
-
-			if ((w != source_width) || (h != source_height))
-			{
-				fprintf(stderr, "wuffs failed decompressing FPNG's output PNG file!\n");
-				return EXIT_FAILURE;
-			}
-
-			wuffs_decode_time = minimum(wuffs_decode_time, tm.get_elapsed_secs());
-		}
-
-		if (!p)
-		{
-			fprintf(stderr, "wuffs failed decompressing FPNG's output PNG file!\n");
-			return EXIT_FAILURE;
-		}
-
-		if (memcmp(p, pSource_pixels32, total_source_pixels * 4) != 0)
-		{
-			fprintf(stderr, "FPNG decode verification failed (using wuffs)!\n");
-			return EXIT_FAILURE;
-		}
-		free(p);
-	}
-		
 	// Compress with lodepng
 
 	uint8_vec lodepng_file_buf;
@@ -1579,7 +1449,7 @@ int main(int arg_c, char **arg_v)
 
 			tm.start();
 
-			void* pImage_data = pv_png::load_png(fpng_file_buf.data(), fpng_file_buf.size(), source_chans, width, height, num_chans);
+			void* pImage_data = pv_png::load_png(fpng_file_buf, fpng_file_buf_size, source_chans, width, height, num_chans);
 
 			pvpng_decode_time = minimum(pvpng_decode_time, tm.get_elapsed_secs());
 
@@ -1625,7 +1495,7 @@ int main(int arg_c, char **arg_v)
 		printf("%s, %u, %u, %u,    %f, %f, %f, %4.3f, %4.3f,    %f, %f, %f, %4.3f, %4.3f,    %f, %f, %f, %4.3f, %4.3f,    %f, %f, %f, %4.3f, %4.3f,   %4.3f, %4.3f\n",
 			pFilename, source_width, source_height, source_chans,
 			qoi_best_time, (double)qoi_len / MB, qoi_decode_time, source_megapixels / qoi_best_time, source_megapixels / qoi_decode_time,
-			fpng_best_time, (double)fpng_file_buf.size() / MB, fpng_decode_time, source_megapixels / fpng_best_time, source_megapixels / fpng_decode_time,
+			fpng_best_time, (double)fpng_file_buf_size / MB, fpng_decode_time, source_megapixels / fpng_best_time, source_megapixels / fpng_decode_time,
 			lodepng_best_time, (double)lodepng_file_buf.size() / MB, lodepng_decode_time, source_megapixels / lodepng_best_time, source_megapixels / lodepng_decode_time,
 			stbi_best_time, (double)stbi_file_buf.size() / MB, stbi_decode_time, source_megapixels / stbi_best_time, source_megapixels / stbi_decode_time,
 			pvpng_decode_time, source_megapixels / pvpng_decode_time
